@@ -6,7 +6,7 @@ import Sidebar from '@/components/layout/Sidebar'
 import KPICard from '@/components/KPICard'
 import TrophyChart from '@/components/charts/TrophyChart'
 import THDistribution from '@/components/charts/THDistribution'
-import { Users, Trophy, TrendingUp, Home, Target, Award, Clock, AlertCircle } from 'lucide-react'
+import { Users, Trophy, TrendingUp, Home, Target, Award, Clock, AlertCircle, MessageCircle } from 'lucide-react'
 import Link from 'next/link'
 
 export default function DashboardPage() {
@@ -15,6 +15,38 @@ export default function DashboardPage() {
     const [data, setData] = useState<any>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState('')
+    const [sendingReminder, setSendingReminder] = useState<string | null>(null)
+    const [reminderStatus, setReminderStatus] = useState<{ [key: string]: 'success' | 'error' | 'no-channel' }>({})
+
+    // Function to send Discord reminder
+    const sendReminder = async (playerTag: string) => {
+        setSendingReminder(playerTag)
+        try {
+            const response = await fetch('/api/discord/reminder', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    playerTag,
+                    clanTag,
+                }),
+            })
+            const result = await response.json()
+
+            if (!response.ok) {
+                if (result.error?.includes('salon Discord')) {
+                    setReminderStatus(prev => ({ ...prev, [playerTag]: 'no-channel' }))
+                } else {
+                    setReminderStatus(prev => ({ ...prev, [playerTag]: 'error' }))
+                }
+            } else {
+                setReminderStatus(prev => ({ ...prev, [playerTag]: 'success' }))
+            }
+        } catch (err) {
+            setReminderStatus(prev => ({ ...prev, [playerTag]: 'error' }))
+        } finally {
+            setSendingReminder(null)
+        }
+    }
 
     useEffect(() => {
         async function fetchData() {
@@ -264,6 +296,105 @@ export default function DashboardPage() {
                             </table>
                         </div>
                     </div>
+
+                    {/* Inactive Players Section */}
+                    {data.activityStats && (
+                        <div className="glassmorphism rounded-xl p-6 mt-6">
+                            <div className="flex items-center justify-between mb-4">
+                                <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                                    <AlertCircle className="w-5 h-5 text-orange-400" />
+                                    Joueurs Inactifs
+                                </h2>
+                                <div className="flex items-center gap-4 text-sm">
+                                    <span className="text-green-400">
+                                        ✓ {data.activityStats.activePlayers} actifs
+                                    </span>
+                                    <span className="text-orange-400">
+                                        ⚠ {data.activityStats.inactivePlayers} inactifs ({data.activityStats.inactiveRate}%)
+                                    </span>
+                                </div>
+                            </div>
+
+                            <p className="text-gray-400 text-sm mb-4">
+                                Joueurs sans changement de données (trophées, dons, attaques) depuis plus de 3 jours.
+                            </p>
+
+                            {data.inactivePlayers && data.inactivePlayers.length > 0 ? (
+                                <div className="space-y-2">
+                                    {data.inactivePlayers.map((player: any) => (
+                                        <div
+                                            key={player.tag}
+                                            className="flex items-center justify-between p-3 bg-gray-800/50 rounded-lg hover:bg-gray-800 transition-colors"
+                                        >
+                                            <div className="flex items-center gap-3">
+                                                <div className="w-10 h-10 rounded-full bg-orange-500/20 flex items-center justify-center">
+                                                    <span className="text-orange-400 font-bold text-sm">
+                                                        {player.townHallLevel || '?'}
+                                                    </span>
+                                                </div>
+                                                <div>
+                                                    <Link
+                                                        href={`/player/${encodeURIComponent(player.tag)}`}
+                                                        className="text-white font-medium hover:text-blue-400 transition-colors"
+                                                    >
+                                                        {player.name}
+                                                    </Link>
+                                                    <div className="text-sm text-gray-400">
+                                                        {player.tag} • {player.trophies.toLocaleString()} 🏆
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-4">
+                                                <div className="text-right">
+                                                    <div className={`text-sm font-medium ${player.inactiveDays && player.inactiveDays >= 7
+                                                        ? 'text-red-400'
+                                                        : 'text-orange-400'
+                                                        }`}>
+                                                        {player.inactiveDays
+                                                            ? `${player.inactiveDays} jour${player.inactiveDays > 1 ? 's' : ''}`
+                                                            : 'Jamais actif'}
+                                                    </div>
+                                                    <div className="text-xs text-gray-500">
+                                                        {player.lastActivity
+                                                            ? formatRelativeTime(player.lastActivity)
+                                                            : 'Aucune donnée'}
+                                                    </div>
+                                                </div>
+                                                {/* Reminder Button */}
+                                                {reminderStatus[player.tag] === 'success' ? (
+                                                    <span className="text-green-400 text-xs">✓ Envoyé</span>
+                                                ) : reminderStatus[player.tag] === 'no-channel' ? (
+                                                    <span className="text-gray-500 text-xs" title="Ce joueur doit utiliser /claim sur Discord">
+                                                        Pas de salon
+                                                    </span>
+                                                ) : reminderStatus[player.tag] === 'error' ? (
+                                                    <span className="text-red-400 text-xs">Erreur</span>
+                                                ) : (
+                                                    <button
+                                                        onClick={() => sendReminder(player.tag)}
+                                                        disabled={sendingReminder === player.tag}
+                                                        className="p-2 rounded-lg bg-purple-600/20 hover:bg-purple-600/40 text-purple-400 transition-colors disabled:opacity-50"
+                                                        title="Envoyer un rappel Discord"
+                                                    >
+                                                        {sendingReminder === player.tag ? (
+                                                            <div className="w-4 h-4 border-2 border-purple-400 border-t-transparent rounded-full animate-spin" />
+                                                        ) : (
+                                                            <MessageCircle className="w-4 h-4" />
+                                                        )}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="text-center py-8 text-gray-500">
+                                    <div className="text-green-400 text-4xl mb-2">✓</div>
+                                    <p>Tous les joueurs sont actifs !</p>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
