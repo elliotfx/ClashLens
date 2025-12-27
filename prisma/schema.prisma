@@ -18,6 +18,7 @@ model User {
   email         String?   @unique
   emailVerified DateTime?
   image         String?
+  discordId     String?   @unique  // Discord user ID for OAuth linking
   accounts      Account[]
   sessions      Session[]
   clans         Clan[]    // User's connected clans
@@ -114,7 +115,6 @@ model Player {
   name              String
   townHallLevel     Int?
   expLevel          Int?
-  league            String?           // Regular multiplayer league
   leagueTier        String?           // Ranked battles league (e.g. "P.E.K.K.A League 22")
   trophies          Int?              // Current trophies
   donations         Int?              // Current season donations
@@ -259,6 +259,7 @@ model DiscordConfig {
   claimCategoryId       String?  // Category for individual channels
   verificationChannelId String?  // Channel for claim requests
   adminRoleId           String?  // Role that can manage claims
+  coachRoleId           String?  // Role for coaches (can view player channels)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   
@@ -269,17 +270,19 @@ model DiscordConfig {
 
 // Player claim requests (Discord user -> CoC player)
 model PlayerClaim {
-  id              String    @id @default(cuid())
-  discordUserId   String
-  discordUsername String
-  playerId        String
-  guildId         String
-  status          String    @default("pending") // pending, approved, rejected
-  screenshotUrl   String?
-  rejectionReason String?
-  requestedAt     DateTime  @default(now())
-  reviewedAt      DateTime?
-  reviewedBy      String?   // Discord ID of reviewer
+  id                String    @id @default(cuid())
+  discordUserId     String
+  discordUsername   String
+  playerId          String
+  guildId           String
+  status            String    @default("pending") // pending, approved, rejected, verified
+  screenshotUrl     String?
+  verificationCode  String?   // Code to verify ownership
+  verifiedAt        DateTime? // When the claim was verified
+  rejectionReason   String?
+  requestedAt       DateTime  @default(now())
+  reviewedAt        DateTime?
+  reviewedBy        String?   // Discord ID of reviewer
   
   player          Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
 
@@ -290,11 +293,11 @@ model PlayerClaim {
   @@index([status])
 }
 
-// Individual private channels for verified players
+// Individual private Discord channels for verified players
 model PlayerChannel {
   id               String   @id @default(cuid())
   discordUserId    String
-  discordChannelId String   @unique
+  discordChannelId String   @unique  // Discord channel ID
   guildId          String
   playerId         String
   createdAt        DateTime @default(now())
@@ -302,5 +305,6 @@ model PlayerChannel {
   player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
 
   @@unique([discordUserId, guildId])
+  @@unique([playerId, guildId]) // One channel per player per guild
   @@index([guildId])
 }

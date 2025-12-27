@@ -16,10 +16,15 @@ import {
     ButtonBuilder,
     ButtonStyle,
     ButtonInteraction,
-    AttachmentBuilder
+    AttachmentBuilder,
+    StringSelectMenuBuilder,
+    StringSelectMenuInteraction
 } from 'discord.js'
 import { prisma } from '../lib/db'
 import { calculateIRJ, getTrophyDelta } from '../lib/utils/irj'
+
+// Map to track which channel each claim was created in (Key: claimId, Value: channelId)
+const claimChannels = new Map<string, string>()
 
 // Command interface
 interface Command {
@@ -141,6 +146,15 @@ const setupCommand: Command = {
                         .setDescription('Rôle qui peut gérer les claims')
                         .setRequired(true)
                 )
+        )
+        .addSubcommand(sub =>
+            sub.setName('coach')
+                .setDescription('Définir le rôle coach')
+                .addRoleOption(opt =>
+                    opt.setName('role')
+                        .setDescription('Rôle qui peut voir les channels privés des joueurs')
+                        .setRequired(true)
+                )
         ) as SlashCommandBuilder,
     async execute(interaction) {
         if (!await isAdmin(interaction)) {
@@ -225,7 +239,14 @@ const setupCommand: Command = {
                         { name: '📋 Comment ça marche ?', value: '1. Un membre utilise `/claim <tag>`\n2. Il envoie une capture d\'écran\n3. Un admin approuve avec `/verify`\n4. Un salon privé est créé pour le joueur' },
                     )
 
-                await verificationChannel.send({ embeds: [welcomeEmbed] })
+                const welcomeMessage = await verificationChannel.send({ embeds: [welcomeEmbed] })
+
+                // Pin the welcome message
+                try {
+                    await welcomeMessage.pin()
+                } catch (error) {
+                    console.log('[Bot] Could not pin welcome message')
+                }
 
             } catch (error) {
                 console.error('[Bot] Setup error:', error)
@@ -240,6 +261,15 @@ const setupCommand: Command = {
             })
 
             await interaction.editReply({ content: `✅ Le rôle **${role.name}** peut maintenant gérer les claims.` })
+        } else if (subcommand === 'coach') {
+            const role = interaction.options.getRole('role', true)
+
+            await prisma.discordConfig.update({
+                where: { guildId },
+                data: { coachRoleId: role.id },
+            })
+
+            await interaction.editReply({ content: `✅ Le rôle **${role.name}** peut maintenant voir les channels privés des joueurs.` })
         }
     },
 }
@@ -251,18 +281,16 @@ const claimCommand: Command = {
         .setDescription('Revendiquer un profil Clash of Clans')
         .addStringOption(option =>
             option
-                .setName('tag')
-                .setDescription('Tag du joueur (ex: #ABC123)')
-                .setRequired(true)
+                .setName('search')
+                .setDescription('Rechercher un joueur par son nom (optionnel)')
+                .setRequired(false)
         ) as SlashCommandBuilder,
     async execute(interaction) {
         await interaction.deferReply({ ephemeral: true })
 
-        const playerTag = interaction.options.getString('tag', true).toUpperCase()
-        const tag = playerTag.startsWith('#') ? playerTag : `#${playerTag}`
+        const searchQuery = interaction.options.getString('search')
         const guildId = interaction.guildId!
         const userId = interaction.user.id
-        const username = interaction.user.username
 
         // Check if config exists
         const config = await prisma.discordConfig.findUnique({
@@ -280,24 +308,14 @@ const claimCommand: Command = {
             return
         }
 
-        // Check if player exists in clan
-        const player = await prisma.player.findFirst({
-            where: {
-                tag,
-                clanId: config.clan.id,
-            },
-        })
-
-        if (!player) {
-            await interaction.editReply({ content: `❌ Le joueur \`${tag}\` n'est pas dans le clan **${config.clan.name}**.` })
-            return
-        }
-
-        // Check if already claimed by this user
+        // Check if already has a PENDING or APPROVED claim (ignore rejected ones)
         const existingClaim = await prisma.playerClaim.findFirst({
             where: {
                 discordUserId: userId,
                 guildId,
+                status: {
+                    in: ['pending', 'approved']
+                }
             },
         })
 
@@ -306,68 +324,73 @@ const claimCommand: Command = {
             return
         }
 
-        // Check if player already claimed by someone else
-        const playerClaimed = await prisma.playerClaim.findFirst({
-            where: {
-                playerId: player.id,
-                guildId,
-                status: 'approved',
-            },
+        // Get all players from clan
+        const players = await prisma.player.findMany({
+            where: { clanId: config.clanId },
+            orderBy: { name: 'asc' }
         })
 
-        if (playerClaimed) {
-            await interaction.editReply({ content: '❌ Ce joueur a déjà été revendiqué par quelqu\'un d\'autre.' })
+        if (players.length === 0) {
+            await interaction.editReply({ content: '❌ Aucun joueur trouvé dans le clan.' })
             return
         }
 
-        // Create claim request
-        const claim = await prisma.playerClaim.create({
-            data: {
-                discordUserId: userId,
-                discordUsername: username,
-                playerId: player.id,
-                guildId,
-                status: 'pending',
-            },
-        })
+        // Filter by search query if provided
+        let filteredPlayers = players
+        if (searchQuery) {
+            filteredPlayers = players.filter(p =>
+                p.name.toLowerCase().includes(searchQuery.toLowerCase())
+            )
 
-        // Send to verification channel
-        const verificationChannel = await interaction.guild!.channels.fetch(config.verificationChannelId) as TextChannel
-
-        if (verificationChannel) {
-            const claimEmbed = new EmbedBuilder()
-                .setColor(0xFACC15)
-                .setTitle('🆕 Nouvelle demande de revendication')
-                .setDescription(`<@${userId}> souhaite revendiquer le profil **${player.name}**`)
-                .addFields(
-                    { name: '👤 Joueur CoC', value: `${player.name} (${player.tag})`, inline: true },
-                    { name: '🏠 HDV', value: `${player.townHallLevel || 'N/A'}`, inline: true },
-                    { name: '📋 Status', value: '⏳ En attente de vérification', inline: false },
-                )
-                .setFooter({ text: `Claim ID: ${claim.id}` })
-                .setTimestamp()
-
-            const row = new ActionRowBuilder<ButtonBuilder>()
-                .addComponents(
-                    new ButtonBuilder()
-                        .setCustomId(`claim_approve_${claim.id}`)
-                        .setLabel('✅ Approuver')
-                        .setStyle(ButtonStyle.Success),
-                    new ButtonBuilder()
-                        .setCustomId(`claim_reject_${claim.id}`)
-                        .setLabel('❌ Rejeter')
-                        .setStyle(ButtonStyle.Danger),
-                )
-
-            await verificationChannel.send({
-                content: `📸 <@${userId}>, envoyez une capture d'écran de votre profil CoC ici pour prouver que c'est bien vous !`,
-                embeds: [claimEmbed],
-                components: [row]
-            })
+            if (filteredPlayers.length === 0) {
+                await interaction.editReply({
+                    content: `❌ Aucun joueur trouvé avec "${searchQuery}"\n\nUtilisez \`/list ${searchQuery}\` pour voir les joueurs disponibles.`
+                })
+                return
+            }
         }
 
+        // Get already claimed players
+        const claimedPlayerIds = await prisma.playerClaim.findMany({
+            where: { guildId, status: 'approved' },
+            select: { playerId: true }
+        }).then(claims => claims.map(c => c.playerId))
+
+        // Filter out already claimed players
+        const availablePlayers = filteredPlayers.filter(p => !claimedPlayerIds.includes(p.id))
+
+        if (availablePlayers.length === 0) {
+            await interaction.editReply({ content: '❌ Tous les joueurs trouvés sont déjà revendiqués.' })
+            return
+        }
+
+        // Create select menu (max 25 options)
+        const selectMenu = new StringSelectMenuBuilder()
+            .setCustomId(`claim_select_${userId}`)
+            .setPlaceholder(searchQuery ? `${availablePlayers.length} joueur(s) trouvé(s)` : 'Sélectionnez votre joueur')
+            .addOptions(
+                availablePlayers.slice(0, 25).map(player => ({
+                    label: `${player.name} ${player.townHallLevel ? `(HDV ${player.townHallLevel})` : ''}`.slice(0, 100),
+                    description: `${player.tag} - ${player.trophies || 0} trophées`.slice(0, 100),
+                    value: player.tag
+                }))
+            )
+
+        const row = new ActionRowBuilder<StringSelectMenuBuilder>()
+            .addComponents(selectMenu)
+
+        const embed = new EmbedBuilder()
+            .setColor(0x7C3AED)
+            .setTitle('📋 Sélectionnez votre joueur')
+            .setDescription(searchQuery ?
+                `**Résultats pour "${searchQuery}"** - ${availablePlayers.length} joueur(s)\n\nChoisissez votre profil dans la liste ci-dessous :` :
+                `**${availablePlayers.length} joueur(s) disponibles** dans ${config.clan.name}\n\nChoisissez votre profil dans la liste ci-dessous :`
+            )
+            .setFooter({ text: availablePlayers.length > 25 ? `Affichage de 25/${availablePlayers.length} joueurs. Utilisez /claim search:<nom> pour affiner.` : null })
+
         await interaction.editReply({
-            content: `✅ Demande envoyée ! Envoyez une capture d'écran de votre profil dans <#${config.verificationChannelId}> pour vérification.`
+            embeds: [embed],
+            components: [row]
         })
     },
 }
@@ -751,7 +774,355 @@ const helpCommand: Command = {
     },
 }
 
-// Register all commands
+// /config command - Server configuration management
+const configCommand: Command = {
+    data: new SlashCommandBuilder()
+        .setName('config')
+        .setDescription('Gérer la configuration du serveur')
+        .addSubcommand(sub =>
+            sub.setName('reset')
+                .setDescription('Supprimer toute la configuration ClashLens')
+        )
+        .addSubcommandGroup(group =>
+            group.setName('claims')
+                .setDescription('Gérer les revendications')
+                .addSubcommand(sub =>
+                    sub.setName('list')
+                        .setDescription('Voir toutes les revendications')
+                        .addStringOption(opt =>
+                            opt.setName('status')
+                                .setDescription('Filtrer par statut')
+                                .addChoices(
+                                    { name: 'En attente', value: 'pending' },
+                                    { name: 'Approuvé', value: 'approved' },
+                                    { name: 'Rejeté', value: 'rejected' }
+                                )
+                        )
+                )
+                .addSubcommand(sub =>
+                    sub.setName('delete')
+                        .setDescription('Supprimer une revendication')
+                        .addStringOption(opt =>
+                            opt.setName('claim_id')
+                                .setDescription('ID du claim (ex: cmjol5xnv0001ionbsty3w2nh)')
+                                .setRequired(true)
+                        )
+                )
+                .addSubcommand(sub =>
+                    sub.setName('add')
+                        .setDescription('Créer une revendication manuellement')
+                        .addUserOption(opt =>
+                            opt.setName('user')
+                                .setDescription('Utilisateur Discord')
+                                .setRequired(true)
+                        )
+                        .addStringOption(opt =>
+                            opt.setName('player_tag')
+                                .setDescription('Tag du joueur (ex: #ABC123)')
+                                .setRequired(true)
+                        )
+                )
+        ) as SlashCommandBuilder,
+    async execute(interaction) {
+        if (!await isAdmin(interaction)) {
+            await interaction.reply({ content: '❌ Seuls les administrateurs peuvent utiliser cette commande.', ephemeral: true })
+            return
+        }
+
+        const subcommand = interaction.options.getSubcommand()
+        const subcommandGroup = interaction.options.getSubcommandGroup()
+        const guildId = interaction.guildId!
+        const guild = interaction.guild!
+
+        // Handle /config reset
+        if (subcommand === 'reset') {
+            await interaction.deferReply()
+
+            try {
+                const config = await prisma.discordConfig.findUnique({
+                    where: { guildId },
+                    include: { clan: true }
+                })
+
+                if (!config) {
+                    await interaction.editReply({ content: '❌ Aucune configuration trouvée pour ce serveur.' })
+                    return
+                }
+
+                // Delete all player claims for this guild
+                await prisma.playerClaim.deleteMany({
+                    where: { guildId }
+                })
+
+                // Delete all player channels for this guild
+                const playerChannels = await prisma.playerChannel.findMany({
+                    where: { guildId }
+                })
+
+                // Delete Discord channels
+                for (const pc of playerChannels) {
+                    try {
+                        const channel = await guild.channels.fetch(pc.discordChannelId)
+                        if (channel) await channel.delete()
+                    } catch (err) {
+                        console.log(`[Bot] Could not delete channel ${pc.discordChannelId}`)
+                    }
+                }
+
+                await prisma.playerChannel.deleteMany({
+                    where: { guildId }
+                })
+
+                // Delete verification channel and category
+                if (config.verificationChannelId) {
+                    try {
+                        const verificationChannel = await guild.channels.fetch(config.verificationChannelId)
+                        if (verificationChannel) await verificationChannel.delete()
+                    } catch (err) {
+                        console.log('[Bot] Could not delete verification channel')
+                    }
+                }
+
+                if (config.claimCategoryId) {
+                    try {
+                        const category = await guild.channels.fetch(config.claimCategoryId)
+                        if (category) await category.delete()
+                    } catch (err) {
+                        console.log('[Bot] Could not delete category')
+                    }
+                }
+
+                // Delete config from database
+                await prisma.discordConfig.delete({
+                    where: { guildId }
+                })
+
+                const embed = new EmbedBuilder()
+                    .setColor(0xEF4444)
+                    .setTitle('🗑️ Configuration supprimée')
+                    .setDescription('Toute la configuration ClashLens a été supprimée de ce serveur.')
+                    .addFields(
+                        { name: 'Clan déconnecté', value: config.clan.name, inline: true },
+                        { name: 'Claims supprimés', value: 'Tous', inline: true },
+                        { name: 'Channels supprimés', value: 'Tous', inline: true },
+                    )
+                    .setFooter({ text: 'Utilisez /connect pour reconnecter un clan' })
+
+                await interaction.editReply({ embeds: [embed] })
+
+            } catch (error) {
+                console.error('[Bot] Config reset error:', error)
+                await interaction.editReply({ content: '❌ Erreur lors de la suppression de la configuration.' })
+            }
+        }
+
+        // Handle /config claims list
+        if (subcommandGroup === 'claims' && subcommand === 'list') {
+            await interaction.deferReply({ ephemeral: true })
+
+            const statusFilter = interaction.options.getString('status') as 'pending' | 'approved' | 'rejected' | null
+
+            try {
+                const claims = await prisma.playerClaim.findMany({
+                    where: {
+                        guildId,
+                        ...(statusFilter && { status: statusFilter })
+                    },
+                    include: { player: true },
+                    orderBy: { requestedAt: 'desc' }
+                })
+
+                if (claims.length === 0) {
+                    await interaction.editReply({ content: '❌ Aucun claim trouvé.' })
+                    return
+                }
+
+                const embed = new EmbedBuilder()
+                    .setColor(0x7C3AED)
+                    .setTitle(`📋 Claims ${statusFilter ? `(${statusFilter})` : ''}`)
+                    .setDescription(`${claims.length} claim(s) total`)
+
+                for (const claim of claims.slice(0, 25)) {
+                    const statusEmoji = claim.status === 'approved' ? '✅' : claim.status === 'rejected' ? '❌' : '⏳'
+                    embed.addFields({
+                        name: `${statusEmoji} ${claim.player.name}`,
+                        value: `User: <@${claim.discordUserId}>\nStatus: ${claim.status}\nID: \`${claim.id}\``,
+                        inline: true
+                    })
+                }
+
+                await interaction.editReply({ embeds: [embed] })
+            } catch (error) {
+                console.error('[Bot] Claims list error:', error)
+                await interaction.editReply({ content: '❌ Erreur lors de la récupération des claims.' })
+            }
+        }
+
+        // Handle /config claims delete
+        if (subcommandGroup === 'claims' && subcommand === 'delete') {
+            await interaction.deferReply({ ephemeral: true })
+
+            const claimId = interaction.options.getString('claim_id', true)
+
+            try {
+                const claim = await prisma.playerClaim.findUnique({
+                    where: { id: claimId },
+                    include: { player: true }
+                })
+
+                if (!claim || claim.guildId !== guildId) {
+                    await interaction.editReply({ content: '❌ Claim non trouvé.' })
+                    return
+                }
+
+                await prisma.playerClaim.delete({
+                    where: { id: claimId }
+                })
+
+                // Remove from tracking map
+                claimChannels.delete(claimId)
+
+                await interaction.editReply({ content: `✅ Claim de **${claim.player.name}** supprimé.` })
+            } catch (error) {
+                console.error('[Bot] Claims delete error:', error)
+                await interaction.editReply({ content: '❌ Erreur lors de la suppression du claim.' })
+            }
+        }
+
+        // Handle /config claims add
+        if (subcommandGroup === 'claims' && subcommand === 'add') {
+            await interaction.deferReply({ ephemeral: true })
+
+            const user = interaction.options.getUser('user', true)
+            const playerTag = interaction.options.getString('player_tag', true)
+
+            try {
+                const config = await prisma.discordConfig.findUnique({
+                    where: { guildId }
+                })
+
+                if (!config) {
+                    await interaction.editReply({ content: '❌ Aucune configuration trouvée.' })
+                    return
+                }
+
+                // Find player
+                const player = await prisma.player.findUnique({
+                    where: { tag: playerTag }
+                })
+
+                if (!player) {
+                    await interaction.editReply({ content: `❌ Joueur ${playerTag} non trouvé.` })
+                    return
+                }
+
+                // Create claim
+                const claim = await prisma.playerClaim.create({
+                    data: {
+                        discordUserId: user.id,
+                        discordUsername: user.username,
+                        playerId: player.id,
+                        guildId,
+                        status: 'approved',
+                        reviewedAt: new Date(),
+                        reviewedBy: interaction.user.id
+                    }
+                })
+
+                await interaction.editReply({ content: `✅ Claim créé et approuvé pour <@${user.id}> → **${player.name}**` })
+            } catch (error) {
+                console.error('[Bot] Claims add error:', error)
+                await interaction.editReply({ content: '❌ Erreur lors de la création du claim.' })
+            }
+        }
+    },
+}
+
+// /list command - List players from the clan
+const listCommand: Command = {
+    data: new SlashCommandBuilder()
+        .setName('list')
+        .setDescription('Lister les joueurs du clan')
+        .addStringOption(option =>
+            option
+                .setName('search')
+                .setDescription('Rechercher un joueur par son nom (optionnel)')
+                .setRequired(false)
+        ) as SlashCommandBuilder,
+    async execute(interaction) {
+        await interaction.deferReply()
+
+        const guildId = interaction.guildId!
+        const searchQuery = interaction.options.getString('search')
+
+        try {
+            const config = await prisma.discordConfig.findUnique({
+                where: { guildId },
+                include: { clan: true }
+            })
+
+            if (!config) {
+                await interaction.editReply({ content: '❌ Aucun clan connecté. Utilisez `/connect` d\'abord.' })
+                return
+            }
+
+            // Get all players from the clan
+            const players = await prisma.player.findMany({
+                where: { clanId: config.clanId },
+                orderBy: { name: 'asc' }
+            })
+
+            if (players.length === 0) {
+                await interaction.editReply({ content: '❌ Aucun joueur trouvé dans le clan.' })
+                return
+            }
+
+            // Filter by search query if provided
+            let filteredPlayers = players
+            if (searchQuery) {
+                filteredPlayers = players.filter(p =>
+                    p.name.toLowerCase().startsWith(searchQuery.toLowerCase())
+                )
+
+                if (filteredPlayers.length === 0) {
+                    await interaction.editReply({
+                        content: `❌ Aucun joueur trouvé commençant par "${searchQuery}"`
+                    })
+                    return
+                }
+            }
+
+            // Create embed with player list
+            const embed = new EmbedBuilder()
+                .setColor(0x7C3AED)
+                .setTitle(`📋 Joueurs du clan ${config.clan.name}`)
+                .setDescription(searchQuery ? `Résultats pour "${searchQuery}" (${filteredPlayers.length})` : `${filteredPlayers.length} joueurs au total`)
+
+            // Split into chunks of 25 (Discord field limit)
+            const chunkSize = 25
+            for (let i = 0; i < filteredPlayers.length; i += chunkSize) {
+                const chunk = filteredPlayers.slice(i, i + chunkSize)
+                const fieldValue = chunk
+                    .map(p => `**${p.name}** - \`${p.tag}\` ${p.townHallLevel ? `(HDV ${p.townHallLevel})` : ''}`)
+                    .join('\n')
+
+                embed.addFields({
+                    name: i === 0 ? '​' : '​', // Zero-width space for continuation
+                    value: fieldValue || 'Aucun joueur'
+                })
+            }
+
+            embed.setFooter({ text: 'Utilisez /list <nom> pour rechercher un joueur spécifique' })
+
+            await interaction.editReply({ embeds: [embed] })
+
+        } catch (error) {
+            console.error('[Bot] List error:', error)
+            await interaction.editReply({ content: '❌ Erreur lors de la récupération des joueurs.' })
+        }
+    },
+}
+
 commands.set('connect', connectCommand)
 commands.set('setup', setupCommand)
 commands.set('claim', claimCommand)
@@ -760,8 +1131,123 @@ commands.set('notify', notifyCommand)
 commands.set('clan', clanCommand)
 commands.set('stats', statsCommand)
 commands.set('help', helpCommand)
+commands.set('config', configCommand)
+commands.set('list', listCommand)
 
 // ============ EVENT HANDLERS ============
+
+// Auto-detect screenshots in verification channel
+client.on('messageCreate', async (message) => {
+    // Ignore bot messages
+    if (message.author.bot) return
+
+    // Check if message has attachments
+    if (message.attachments.size === 0) return
+
+    console.log('[Bot] 📸 Image détectée de:', message.author.username, 'dans channel:', message.channelId)
+
+    const guildId = message.guildId
+    if (!guildId) return
+
+    // Check if this is the verification channel
+    const config = await prisma.discordConfig.findUnique({
+        where: { guildId }
+    })
+
+    if (!config || !config.verificationChannelId) {
+        console.log('[Bot] ❌ Pas de config ou verificationChannelId')
+        return
+    }
+
+    // Find pending claim for this user (from any channel in the server)
+    const claim = await prisma.playerClaim.findFirst({
+        where: {
+            discordUserId: message.author.id,
+            guildId,
+            status: 'pending',
+            screenshotUrl: null // Only claims without screenshot
+        },
+        include: { player: true }
+    })
+
+    if (!claim) {
+        console.log('[Bot] ❌ Pas de claim pending trouvé pour:', message.author.username)
+        return
+    }
+
+    console.log('[Bot] ✅ Claim trouvé:', claim.id, 'pour joueur:', claim.player.name)
+
+    // NOTE: We accept screenshots from ANY channel because the claimChannels Map
+    // is cleared on bot restart. To fix this properly, we'd need to store the
+    // channelId in the database, not in memory.
+
+    console.log('[Bot] ✅ Screenshot accepté ! Mise à jour...')
+
+    const attachment = message.attachments.first()
+    if (!attachment) return
+
+    // Save screenshot URL
+    await prisma.playerClaim.update({
+        where: { id: claim.id },
+        data: { screenshotUrl: attachment.url }
+    })
+
+    // Don't delete user's message - keep it for valid URL
+    // The screenshot URL needs to remain accessible
+
+    // Find and update claim message in VERIFICATION channel
+    const channel = await client.channels.fetch(config.verificationChannelId!) as TextChannel
+
+    // Find the claim message and update it
+    const messages = await channel.messages.fetch({ limit: 50 })
+    console.log('[Bot] 🔍 Recherche du message dans', channel.name, '- Nb messages:', messages.size)
+    const claimMessage = messages.find(m =>
+        m.author.id === client.user?.id &&
+        m.embeds[0]?.footer?.text === `Claim ID: ${claim.id}`
+    )
+
+    console.log('[Bot] Message trouvé ?', claimMessage ? '✅ OUI' : '❌ NON')
+
+    if (claimMessage) {
+        const originalEmbed = claimMessage.embeds[0]
+        const updatedEmbed = EmbedBuilder.from(originalEmbed)
+            .setImage(attachment.url)
+            .setFields(
+                originalEmbed.fields.filter(f => f.name !== '📋 Status')
+            )
+            .addFields({
+                name: '📋 Status',
+                value: '⏳ En attente de vérification',
+                inline: false
+            })
+
+        const row = new ActionRowBuilder<ButtonBuilder>()
+            .addComponents(
+                new ButtonBuilder()
+                    .setCustomId(`claim_approve_${claim.id}`)
+                    .setLabel('✅ Approuver')
+                    .setStyle(ButtonStyle.Success),
+                new ButtonBuilder()
+                    .setCustomId(`claim_reject_${claim.id}`)
+                    .setLabel('❌ Rejeter')
+                    .setStyle(ButtonStyle.Danger),
+            )
+
+        await claimMessage.edit({
+            content: `📸 Screenshot reçu de <@${message.author.id}> !`,
+            embeds: [updatedEmbed],
+            components: [row]
+        })
+
+        // Confirm to user via DM
+        try {
+            const user = await client.users.fetch(message.author.id)
+            await user.send(`✅ **Screenshot reçu !**\n\nVotre capture d'écran pour **${claim.player.name}** a été ajoutée à votre demande.\n\nUn admin la vérifiera sous peu. 👍`)
+        } catch (err) {
+            console.log('[Bot] Could not DM user')
+        }
+    }
+})
 
 client.once('ready', async () => {
     console.log(`[Bot] ✅ Connecté en tant que ${client.user?.tag}`)
@@ -774,7 +1260,7 @@ client.once('ready', async () => {
     try {
         console.log('[Bot] 📝 Enregistrement des commandes...')
 
-        // Register to each guild
+        // Register to each guild (NOT globally to avoid duplicates)
         for (const guild of client.guilds.cache.values()) {
             await rest.put(
                 Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID!, guild.id),
@@ -782,12 +1268,6 @@ client.once('ready', async () => {
             )
             console.log(`[Bot] ✅ Commandes enregistrées pour: ${guild.name}`)
         }
-
-        // Also register globally
-        await rest.put(
-            Routes.applicationCommands(process.env.DISCORD_CLIENT_ID!),
-            { body: commandsData }
-        )
 
         console.log(`[Bot] ✅ ${commandsData.length} commandes enregistrées`)
     } catch (error) {
@@ -922,11 +1402,109 @@ client.on('interactionCreate', async (interaction) => {
                     },
                 })
 
+                // Update the embed to show rejection
+                const originalEmbed = buttonInteraction.message.embeds[0]
+                const updatedEmbed = EmbedBuilder.from(originalEmbed)
+                    .setColor(0xEF4444) // Red color
+                    .setFields(
+                        originalEmbed.fields.filter(f => f.name !== '📋 Status')
+                    )
+                    .addFields({
+                        name: '📋 Status',
+                        value: `❌ Rejeté par <@${buttonInteraction.user.id}>`,
+                        inline: false
+                    })
+
                 await buttonInteraction.update({
-                    content: `❌ Rejeté par <@${buttonInteraction.user.id}>`,
+                    embeds: [updatedEmbed],
                     components: [],
                 })
             }
+        }
+    }
+
+    // Handle select menu interactions (claim player selection)
+    if (interaction.isStringSelectMenu()) {
+        const selectInteraction = interaction as StringSelectMenuInteraction
+        const customId = selectInteraction.customId
+
+        if (customId.startsWith('claim_select_')) {
+            await selectInteraction.deferReply({ ephemeral: true })
+
+            const selectedTag = selectInteraction.values[0]
+            const userId = selectInteraction.user.id
+            const username = selectInteraction.user.username
+            const guildId = selectInteraction.guildId!
+
+            const config = await prisma.discordConfig.findUnique({
+                where: { guildId },
+                include: { clan: true }
+            })
+
+            if (!config) {
+                await selectInteraction.editReply({ content: '❌ Configuration non trouvée.' })
+                return
+            }
+
+            // Get player
+            const player = await prisma.player.findUnique({
+                where: { tag: selectedTag }
+            })
+
+            if (!player) {
+                await selectInteraction.editReply({ content: '❌ Joueur non trouvé.' })
+                return
+            }
+
+            // Delete any rejected claims for this user+player combination
+            await prisma.playerClaim.deleteMany({
+                where: {
+                    discordUserId: userId,
+                    playerId: player.id,
+                    guildId,
+                    status: 'rejected'
+                }
+            })
+
+            // Create claim request
+            const claim = await prisma.playerClaim.create({
+                data: {
+                    discordUserId: userId,
+                    discordUsername: username,
+                    playerId: player.id,
+                    guildId,
+                    status: 'pending',
+                },
+            })
+
+            // Store the channel ID where this claim was created
+            claimChannels.set(claim.id, selectInteraction.channelId)
+
+            // Send message in VERIFICATION CHANNEL
+            const verificationChannel = await selectInteraction.guild!.channels.fetch(config.verificationChannelId!) as TextChannel
+
+            if (verificationChannel) {
+                const claimEmbed = new EmbedBuilder()
+                    .setColor(0xFACC15)
+                    .setTitle('🆕 Nouvelle demande de revendication')
+                    .setDescription(`<@${userId}> souhaite revendiquer le profil **${player.name}**`)
+                    .addFields(
+                        { name: '👤 Joueur CoC', value: `${player.name} (${player.tag})`, inline: true },
+                        { name: '🏠 HDV', value: `${player.townHallLevel || 'N/A'}`, inline: true },
+                        { name: '📋 Status', value: '⏳ En attente de screenshot', inline: false },
+                    )
+                    .setFooter({ text: `Claim ID: ${claim.id}` })
+                    .setTimestamp()
+
+                await verificationChannel.send({
+                    content: `📸 <@${userId}> doit envoyer un screenshot de **${player.name}**`,
+                    embeds: [claimEmbed]
+                })
+            }
+
+            await selectInteraction.editReply({
+                content: `✅ **Demande créée !**\n\nEnvoyez maintenant une capture d'écran de votre profil **${player.name}** ICI (dans ce channel).\n\nLe bot détectera automatiquement votre screenshot et le transférera dans <#${config.verificationChannelId}> ! 👍`
+            })
         }
     }
 })

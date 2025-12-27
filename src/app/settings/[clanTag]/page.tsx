@@ -43,7 +43,21 @@ export default function SettingsPage() {
     useEffect(() => {
         const loaded = loadCustomThLeagueReference()
         setThLeagueRef(loaded)
-    }, [])
+
+        // Load snapshot frequency from API for this specific clan
+        if (clanTag) {
+            fetch(`/api/settings?clanTag=${encodeURIComponent(clanTag)}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (data.snapshotFrequency) {
+                        setSnapshotFrequency(data.snapshotFrequency.toString())
+                    }
+                })
+                .catch(err => {
+                    console.error('Failed to load settings:', err)
+                })
+        }
+    }, [clanTag])
 
     // Sync progress animation
     useEffect(() => {
@@ -84,15 +98,36 @@ export default function SettingsPage() {
     }, [syncing, currentStep])
 
     const handleSave = async () => {
+        if (!clanTag) {
+            setMessage('Erreur: Aucun clan sélectionné')
+            return
+        }
+
         setSaving(true)
         setMessage('')
 
         try {
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-            setMessage('Settings saved successfully!')
+            const response = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    clanTag,
+                    snapshotFrequency: parseInt(snapshotFrequency)
+                })
+            })
+
+            const data = await response.json()
+
+            if (!response.ok) {
+                setMessage(data.error || 'Échec de la sauvegarde')
+                return
+            }
+
+            setMessage('Paramètres sauvegardés avec succès !')
             setTimeout(() => setMessage(''), 3000)
         } catch (error) {
-            setMessage('Failed to save settings')
+            console.error('Save error:', error)
+            setMessage('Erreur lors de la sauvegarde des paramètres')
         } finally {
             setSaving(false)
         }

@@ -85,7 +85,7 @@ export async function collectPlayerSnapshot(playerTag: string, clanId?: string):
                     name: playerData.name,
                     townHallLevel: playerData.townHallLevel,
                     expLevel: playerData.expLevel,
-                    league: playerData.league?.name,
+                    leagueTier: (playerData as any).leagueTier?.name,  // Ranked league
                     clanId: clanId,
                     role: playerData.role,
                 },
@@ -98,7 +98,6 @@ export async function collectPlayerSnapshot(playerTag: string, clanId?: string):
                     name: playerData.name,
                     townHallLevel: playerData.townHallLevel,
                     expLevel: playerData.expLevel,
-                    league: playerData.league?.name,
                     leagueTier: (playerData as any).leagueTier?.name,  // Ranked league
                     trophies: playerData.trophies,
                     donations: playerData.donations,
