@@ -288,7 +288,7 @@ export default function SettingsPage() {
                     <div className="glassmorphism rounded-xl p-6">
                         <h2 className="text-xl font-bold text-white mb-4">Manual Sync</h2>
                         <p className="text-gray-400 mb-4">
-                            Déclencher une collecte immédiate des données pour tous les clans connectés :
+                            Déclencher une collecte immédiate des données pour ce clan :
                             snapshots, données ranked et guerres.
                         </p>
 

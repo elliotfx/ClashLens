@@ -128,6 +128,8 @@ model Player {
   snapshots       PlayerSnapshot[]
   rankedWeeks     PlayerRankedWeek[]
   trophiesDaily   PlayerTrophiesDaily[]
+  claims          PlayerClaim[]
+  channels        PlayerChannel[]
 
   @@index([tag])
   @@index([clanId])
@@ -248,16 +250,57 @@ model WarAttack {
 }
 
 model DiscordConfig {
-  id              String   @id @default(cuid())
-  guildId         String   @unique
-  clanId          String
+  id                    String   @id @default(cuid())
+  guildId               String   @unique
+  clanId                String
   notificationChannelId String?
-  notificationEnabled Boolean @default(true)
-  notificationTime String  @default("09:00") // HH:MM format
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  notificationEnabled   Boolean  @default(true)
+  notificationTime      String   @default("09:00")
+  claimCategoryId       String?  // Category for individual channels
+  verificationChannelId String?  // Channel for claim requests
+  adminRoleId           String?  // Role that can manage claims
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
   
-  clan            Clan     @relation(fields: [clanId], references: [id], onDelete: Cascade)
+  clan                  Clan     @relation(fields: [clanId], references: [id], onDelete: Cascade)
 
+  @@index([guildId])
+}
+
+// Player claim requests (Discord user -> CoC player)
+model PlayerClaim {
+  id              String    @id @default(cuid())
+  discordUserId   String
+  discordUsername String
+  playerId        String
+  guildId         String
+  status          String    @default("pending") // pending, approved, rejected
+  screenshotUrl   String?
+  rejectionReason String?
+  requestedAt     DateTime  @default(now())
+  reviewedAt      DateTime?
+  reviewedBy      String?   // Discord ID of reviewer
+  
+  player          Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([discordUserId, playerId])
+  @@unique([discordUserId, guildId]) // One claim per user per guild
+  @@index([discordUserId])
+  @@index([guildId])
+  @@index([status])
+}
+
+// Individual private channels for verified players
+model PlayerChannel {
+  id               String   @id @default(cuid())
+  discordUserId    String
+  discordChannelId String   @unique
+  guildId          String
+  playerId         String
+  createdAt        DateTime @default(now())
+  
+  player           Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([discordUserId, guildId])
   @@index([guildId])
 }

@@ -49,7 +49,7 @@ npm install
 Copy `.env.example` to `.env` and fill in your values:
 
 ```bash
-cp .env.example .env
+cp .env.local .env
 ```
 
 Required environment variables:
@@ -67,7 +67,7 @@ DISCORD_TOKEN="your_discord_bot_token_here"
 DISCORD_CLIENT_ID="your_discord_application_id_here"
 
 # CRON Security - Generate a random secret
-CRON_SECRET="your_random_secret_for_cron_endpoints"
+CRON_SECRET="clashLens2024SuperSecretKey123!@#"
 
 # App Configuration
 NEXT_PUBLIC_APP_URL="http://localhost:3000"
