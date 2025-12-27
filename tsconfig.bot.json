@@ -1,0 +1,25 @@
+{
+    "compilerOptions": {
+        "target": "ES2017",
+        "module": "commonjs",
+        "lib": [
+            "ES2017"
+        ],
+        "outDir": "./dist",
+        "rootDir": "./src/bot",
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "resolveJsonModule": true,
+        "moduleResolution": "node"
+    },
+    "include": [
+        "src/bot/**/*",
+        "src/lib/**/*"
+    ],
+    "exclude": [
+        "node_modules",
+        "dist"
+    ]
+}

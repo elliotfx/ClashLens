@@ -1,0 +1,3 @@
+# Prisma Migrations
+
+This directory contains database migration files. After running `npm run prisma:migrate`, your migration files will be generated here.

@@ -1,0 +1,263 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== AUTH MODELS ====================
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  accounts      Account[]
+  sessions      Session[]
+  clans         Clan[]    // User's connected clans
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ==================== APP MODELS ====================
+
+model Clan {
+  id                String           @id @default(cuid())
+  tag               String           @unique
+  name              String
+  description       String?
+  level             Int?
+  members           Int?
+  requiredTrophies  Int?
+  warFrequency      String?
+  location          String?
+  badgeUrls         Json?
+  isWarLogPublic    Boolean          @default(false)
+  snapshotFrequency Int              @default(60) // minutes
+  userId            String?          // Owner of this clan connection
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  user              User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  snapshots         ClanSnapshot[]
+  players           Player[]
+  wars              War[]
+  discordConfigs    DiscordConfig[]
+
+  @@index([tag])
+  @@index([userId])
+}
+
+model ClanSnapshot {
+  id              String   @id @default(cuid())
+  clanId          String
+  timestamp       DateTime @default(now())
+  members         Int
+  clanPoints      Int
+  clanVersusPoints Int?
+  requiredTrophies Int?
+  warWins         Int?
+  warWinStreak    Int?
+  warTies         Int?
+  warLosses       Int?
+  jsonRaw         Json
+  
+  clan            Clan     @relation(fields: [clanId], references: [id], onDelete: Cascade)
+
+  @@index([clanId, timestamp])
+}
+
+model Player {
+  id                String            @id @default(cuid())
+  tag               String            @unique
+  name              String
+  townHallLevel     Int?
+  expLevel          Int?
+  league            String?           // Regular multiplayer league
+  leagueTier        String?           // Ranked battles league (e.g. "P.E.K.K.A League 22")
+  trophies          Int?              // Current trophies
+  donations         Int?              // Current season donations
+  donationsReceived Int?              // Current season donations received
+  clanId            String?
+  role              String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  
+  clan            Clan?             @relation(fields: [clanId], references: [id], onDelete: SetNull)
+  snapshots       PlayerSnapshot[]
+  rankedWeeks     PlayerRankedWeek[]
+  trophiesDaily   PlayerTrophiesDaily[]
+
+  @@index([tag])
+  @@index([clanId])
+}
+
+// Weekly Ranked Battles data - one row per player per week
+model PlayerRankedWeek {
+  id              String    @id @default(cuid())
+  playerId        String
+  weekId          String    // Format: "2025-W01" (ISO week)
+  leagueRanked    String?   // Ranked league name (Bronze I, Silver II, etc.)
+  rankedTrophies  Int?      // Ranked trophies if available
+  weeklyAttacks   Int?      // Total attacks this week
+  weeklyDefenses  Int?      // Total defenses this week
+  weeklyStars     Int?      // Stars earned this week
+  previousLeague  String?   // League from previous week (for tracking promotion/demotion)
+  promoted        Boolean   @default(false) // True if promoted this week
+  demoted         Boolean   @default(false) // True if demoted this week
+  updatedAt       DateTime  @updatedAt
+  finalizedAt     DateTime? // Set when week is locked
+  jsonRaw         Json?     // Raw API data
+  
+  player          Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, weekId])
+  @@index([playerId])
+  @@index([weekId])
+}
+
+// Daily trophies - compacted weekly (only Sunday kept for history)
+model PlayerTrophiesDaily {
+  id              String    @id @default(cuid())
+  playerId        String
+  date            DateTime  @db.Date // Date only, no time
+  weekId          String    // Format: "2025-W01"
+  trophies        Int
+  isSunday        Boolean   @default(false) // True for Sunday records (kept permanently)
+  
+  player          Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@unique([playerId, date])
+  @@index([playerId, weekId])
+  @@index([weekId, isSunday])
+}
+
+model PlayerSnapshot {
+  id              String   @id @default(cuid())
+  playerId        String
+  timestamp       DateTime @default(now())
+  trophies        Int
+  bestTrophies    Int?
+  donationsSent   Int?
+  donationsReceived Int?
+  attackWins      Int?
+  defenseWins     Int?
+  townHallLevel   Int?
+  expLevel        Int?
+  warStars        Int?
+  jsonRaw         Json
+  
+  player          Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@index([playerId, timestamp])
+}
+
+model War {
+  id              String   @id @default(cuid())
+  warKey          String   @unique // deterministic key based on clans + start time
+  clanId          String
+  state           String   // inWar, warEnded, preparation, notInWar
+  teamSize        Int?
+  attacksPerMember Int?
+  preparationStartTime DateTime?
+  startTime       DateTime?
+  endTime         DateTime?
+  opponentTag     String?
+  opponentName    String?
+  result          String?  // win, lose, tie, null
+  stars           Int?
+  destructionPercentage Float?
+  opponentStars   Int?
+  opponentDestructionPercentage Float?
+  jsonRaw         Json
+  createdAt       DateTime @default(now())
+  
+  clan            Clan        @relation(fields: [clanId], references: [id], onDelete: Cascade)
+  attacks         WarAttack[]
+
+  @@index([clanId])
+  @@index([warKey])
+}
+
+// Individual war attacks with performance scores
+model WarAttack {
+  id              String   @id @default(cuid())
+  warId           String
+  attackerTag     String
+  attackerName    String?
+  attackerTH      Int
+  defenderTag     String
+  defenderName    String?
+  defenderTH      Int
+  defenderMapPos  Int?     // Map position of defender
+  stars           Int
+  destructionPct  Float
+  order           Int      // Attack order in war
+  attackScore     Int      // SPA score calculated
+  thDiff          Int      // TH difference (defender - attacker)
+  category        String   // 'climb', 'level', 'dip'
+  rating          String   // 'excellent', 'good', 'average', 'poor', 'fail'
+  createdAt       DateTime @default(now())
+  
+  war             War      @relation(fields: [warId], references: [id], onDelete: Cascade)
+
+  @@index([warId])
+  @@index([attackerTag])
+  @@index([defenderTag])
+}
+
+model DiscordConfig {
+  id              String   @id @default(cuid())
+  guildId         String   @unique
+  clanId          String
+  notificationChannelId String?
+  notificationEnabled Boolean @default(true)
+  notificationTime String  @default("09:00") // HH:MM format
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  clan            Clan     @relation(fields: [clanId], references: [id], onDelete: Cascade)
+
+  @@index([guildId])
+}
