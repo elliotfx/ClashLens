@@ -11,7 +11,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "bot": "tsx --tsconfig tsconfig.bot.json src/bot/index.ts",
-    "bot:dev": "tsx watch --tsconfig tsconfig.bot.json src/bot/index.ts"
+    "bot:dev": "tsx watch --tsconfig tsconfig.bot.json src/bot/index.ts",
+    "dev:all": "concurrently \"npm run dev\" \"npm run bot\" --names \"WEB,BOT\" --prefix-colors \"blue,green\""
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.1",
@@ -37,6 +38,7 @@
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "autoprefixer": "^10.4.23",
+    "concurrently": "^9.2.1",
     "eslint": "^8.57.1",
     "eslint-config-next": "14.2.18",
     "postcss": "^8.4.49",
