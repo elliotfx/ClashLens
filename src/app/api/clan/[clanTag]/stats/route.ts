@@ -124,6 +124,77 @@ export async function GET(
         const lastSnapshot = clan.snapshots[0]
         const totalSnapshots = clan.snapshots.length
 
+        // Calculate player inactivity based on last snapshot data change
+        const inactivityThreshold = 3 * 24 * 60 * 60 * 1000 // 3 days
+        const now = new Date()
+
+        const playersWithActivity = players.map(player => {
+            const latestPlayerSnapshot = player.snapshots[0]
+            const previousSnapshot = player.snapshots[1]
+
+            // Determine last activity: when data actually changed
+            let lastActivity: Date | null = null
+
+            if (latestPlayerSnapshot) {
+                // If we have multiple snapshots, find when data last changed
+                if (previousSnapshot) {
+                    // Compare key metrics to detect activity
+                    const hasChanged = (
+                        latestPlayerSnapshot.trophies !== previousSnapshot.trophies ||
+                        latestPlayerSnapshot.donationsSent !== previousSnapshot.donationsSent ||
+                        latestPlayerSnapshot.attackWins !== previousSnapshot.attackWins
+                    )
+
+                    if (hasChanged) {
+                        lastActivity = latestPlayerSnapshot.timestamp
+                    } else {
+                        // Find the last snapshot where data changed
+                        for (let i = 0; i < player.snapshots.length - 1; i++) {
+                            const curr = player.snapshots[i]
+                            const prev = player.snapshots[i + 1]
+                            if (curr.trophies !== prev.trophies ||
+                                curr.donationsSent !== prev.donationsSent ||
+                                curr.attackWins !== prev.attackWins) {
+                                lastActivity = curr.timestamp
+                                break
+                            }
+                        }
+                    }
+                } else {
+                    lastActivity = latestPlayerSnapshot.timestamp
+                }
+            }
+
+            const inactiveSince = lastActivity ? now.getTime() - lastActivity.getTime() : null
+            const isInactive = inactiveSince ? inactiveSince > inactivityThreshold : true
+            const inactiveDays = inactiveSince ? Math.floor(inactiveSince / (24 * 60 * 60 * 1000)) : null
+
+            return {
+                tag: player.tag,
+                name: player.name,
+                townHallLevel: player.townHallLevel,
+                trophies: latestPlayerSnapshot?.trophies || 0,
+                lastActivity: lastActivity?.toISOString() || null,
+                isInactive,
+                inactiveDays,
+            }
+        })
+
+        // Get inactive players sorted by inactivity duration
+        const inactivePlayers = playersWithActivity
+            .filter(p => p.isInactive)
+            .sort((a, b) => (b.inactiveDays || 999) - (a.inactiveDays || 999))
+
+        // Activity stats
+        const activityStats = {
+            totalPlayers: players.length,
+            activePlayers: playersWithActivity.filter(p => !p.isInactive).length,
+            inactivePlayers: inactivePlayers.length,
+            inactiveRate: players.length > 0
+                ? Math.round((inactivePlayers.length / players.length) * 100)
+                : 0,
+        }
+
         return NextResponse.json({
             clan: {
                 name: clan.name,
@@ -149,6 +220,8 @@ export async function GET(
                 trophyHistory: trophyChartData,
                 thDistribution: thDistributionData,
             },
+            activityStats,
+            inactivePlayers,
         })
     } catch (error) {
         console.error('[API] Get dashboard stats error:', error)
